@@ -1,0 +1,35 @@
+dependencies:
+  espressif/lan865x:
+    component_hash: 64d502b8b69fa0013cbb02d778168ece81dc996bc146ec1116e1200104da51a8
+    dependencies:
+    - name: espressif/lan86xx_common
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.2.0
+  espressif/lan86xx_common:
+    component_hash: 6dcb1be9f43ae940979bd628fa5bee278949b66c545e1fe2321e486102e81026
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
+  idf:
+    source:
+      type: idf
+    version: 5.5.4
+direct_dependencies:
+- espressif/lan865x
+- idf
+manifest_hash: c1e15a96a10227304e1544971abe5c3ee2414ad8a5aacddf70487fb7675699de
+target: esp32
+version: 2.0.0
