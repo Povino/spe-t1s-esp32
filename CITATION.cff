@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this repository/code in your work, please cite the thesis listed in preferred-citation."
+title: "ESP32 LAN8651 10BASE-T1S Firmware"
+type: software
+authors:
+  - given-names: Martin
+    family-names: Považan
+version: 0.1.0
+date-released: "2026-05-18"
+license: BSD-3-Clause
+url: "https://github.com/Povino/spe-t1s-esp32"
+repository-code: "https://github.com/Povino/spe-t1s-esp32"
+preferred-citation:
+  type: thesis
+  title: "Single Pair Ethernet for sensor and IoT networks"
+  authors:
+    - given-names: Martin
+      family-names: Považan
+  thesis-type: "Master's thesis"
+  institution:
+    name: "Masaryk University"
+  department: "Faculty of Informatics"
+  year: 2026
+  url: "https://is.muni.cz/th/he1ye/"
