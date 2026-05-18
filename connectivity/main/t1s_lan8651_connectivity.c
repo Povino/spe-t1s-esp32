@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -42,18 +43,51 @@ static const char *TAG = "T1S_LAN8651";
  * ESP32 3V3    -> Click 3.3V
  * ESP32 GND    -> Click GND
  */
-#define PIN_NUM_MISO   19
-#define PIN_NUM_MOSI   23
-#define PIN_NUM_SCLK   18
-#define PIN_NUM_CS     25
-#define PIN_NUM_INT    22
+#define PIN_NUM_MISO      19
+#define PIN_NUM_MOSI      23
+#define PIN_NUM_SCLK      18
+#define PIN_NUM_CS        25
+#define PIN_NUM_INT       22
 
-#define ETH_SPI_HOST       SPI3_HOST
-#define ETH_SPI_CLOCK_HZ   (1 * 1000 * 1000)
-#define UDP_PORT           5005
-#define APP_IP_LAST_OCTET  (CONFIG_APP_NODE_ID + 1)
+#define ETH_SPI_HOST      SPI3_HOST
+#define ETH_SPI_CLOCK_HZ  (1 * 1000 * 1000)
+
+#define UDP_PORT          5005
+#define UDP_BROADCAST_IP  "192.168.50.255"
+
+#define APP_IP_LAST_OCTET (CONFIG_APP_NODE_ID + 1)
 
 static volatile bool s_got_ip = false;
+
+/**
+ * @brief Stop the application after an unrecoverable configuration or runtime error.
+ *
+ * The firmware is intended for reproducible laboratory measurements. If a
+ * configuration or initialization error is detected, the application remains
+ * alive and periodically yields instead of continuing with invalid test state.
+ */
+static void stop_on_error(void)
+{
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/**
+ * @brief Validate configuration values that depend on each other.
+ *
+ * Kconfig restricts individual option ranges, but relationships between
+ * options still need runtime validation. In particular, the selected node ID
+ * must be lower than the configured number of nodes in the tested topology.
+ */
+static void validate_config(void)
+{
+    if (CONFIG_APP_NODE_ID >= CONFIG_APP_NODE_COUNT) {
+        ESP_LOGE(TAG, "Invalid configuration: APP_NODE_ID=%d, APP_NODE_COUNT=%d",
+                 CONFIG_APP_NODE_ID, CONFIG_APP_NODE_COUNT);
+        stop_on_error();
+    }
+}
 
 /**
  * @brief Handle Ethernet link-state events from the ESP-IDF Ethernet driver.
@@ -225,7 +259,9 @@ static void udp_rx_task(void *arg)
     }
 
     int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        ESP_LOGW(TAG, "SO_REUSEADDR failed: errno=%d", errno);
+    }
 
     struct sockaddr_in listen_addr = {0};
     listen_addr.sin_family = AF_INET;
@@ -251,11 +287,11 @@ static void udp_rx_task(void *arg)
                            (struct sockaddr *)&source_addr, &socklen);
 
         if (len < 0) {
-            ESP_LOGW(TAG, "recvfrom failed");
+            ESP_LOGW(TAG, "recvfrom failed: errno=%d", errno);
             continue;
         }
 
-        rx_buffer[len] = 0;
+        rx_buffer[len] = '\0';
 
         char addr_str[16];
         inet_ntoa_r(source_addr.sin_addr, addr_str, sizeof(addr_str));
@@ -277,6 +313,7 @@ static void udp_rx_task(void *arg)
 static void udp_tx_task(void *arg)
 {
     (void)arg;
+
     while (!s_got_ip) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -289,28 +326,48 @@ static void udp_tx_task(void *arg)
     }
 
     int broadcast = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0) {
+        ESP_LOGE(TAG, "SO_BROADCAST failed: errno=%d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
 
     struct sockaddr_in dest_addr = {0};
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(UDP_PORT);
-    dest_addr.sin_addr.s_addr = inet_addr("192.168.50.255");
+    dest_addr.sin_addr.s_addr = inet_addr(UDP_BROADCAST_IP);
 
     uint32_t seq = 0;
     char tx_buffer[128];
 
-    ESP_LOGI(TAG, "UDP TX broadcasting to 192.168.50.255:%d", UDP_PORT);
+    ESP_LOGI(TAG, "UDP TX broadcasting to %s:%d", UDP_BROADCAST_IP, UDP_PORT);
 
     while (1) {
-        snprintf(tx_buffer, sizeof(tx_buffer),
-                 "node_id=%d ip=192.168.50.%d seq=%" PRIu32,
-                 CONFIG_APP_NODE_ID, APP_IP_LAST_OCTET, seq++);
+        int msg_len = snprintf(tx_buffer, sizeof(tx_buffer),
+                               "node_id=%d ip=192.168.50.%d seq=%" PRIu32,
+                               CONFIG_APP_NODE_ID, APP_IP_LAST_OCTET, seq++);
 
-        int err = sendto(sock, tx_buffer, strlen(tx_buffer), 0,
-                         (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (msg_len < 0) {
+            ESP_LOGW(TAG, "Failed to format UDP TX message");
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_UDP_INTERVAL_MS));
+            continue;
+        }
 
-        if (err < 0) {
+        if (msg_len >= (int)sizeof(tx_buffer)) {
+            ESP_LOGW(TAG, "UDP TX message truncated");
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_UDP_INTERVAL_MS));
+            continue;
+        }
+
+        int sent = sendto(sock, tx_buffer, (size_t)msg_len, 0,
+                          (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
+        if (sent < 0) {
             ESP_LOGW(TAG, "sendto failed: errno=%d", errno);
+        } else if (sent != msg_len) {
+            ESP_LOGW(TAG, "sendto sent partial datagram: sent=%d expected=%d",
+                     sent, msg_len);
         } else {
             ESP_LOGI(TAG, "TX -> %s", tx_buffer);
         }
@@ -333,6 +390,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Node ID: %d", CONFIG_APP_NODE_ID);
     ESP_LOGI(TAG, "Static IP: 192.168.50.%d", APP_IP_LAST_OCTET);
     ESP_LOGI(TAG, "Configured PLCA node count: %d", CONFIG_APP_NODE_COUNT);
+    ESP_LOGI(TAG, "SPI clock: %d Hz", ETH_SPI_CLOCK_HZ);
+
+    validate_config();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -369,10 +429,10 @@ void app_main(void)
 
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
 
-   /*
-    * The tested wiring leaves the Click board RST pin unconnected.
-    * Reset control is therefore disabled in the PHY configuration.
-    */
+    /*
+     * The tested wiring leaves the Click board RST pin unconnected.
+     * Reset control is therefore disabled in the PHY configuration.
+     */
     phy_config.reset_gpio_num = -1;
 
     eth_lan865x_config_t lan865x_config =
@@ -380,9 +440,9 @@ void app_main(void)
 
     lan865x_config.int_gpio_num = PIN_NUM_INT;
 
-   /*
-    * The LAN8651 interrupt pin is used, so periodic polling is disabled.
-    */
+    /*
+     * The LAN8651 interrupt pin is used, so periodic polling is disabled.
+     */
     lan865x_config.poll_period_ms = 0;
 
     esp_eth_mac_t *mac = esp_eth_mac_new_lan865x(&lan865x_config, &mac_config);
@@ -401,9 +461,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Check wiring, 3.3 V power, GND, MISO/MOSI, CS, IRQ, and Q1/CS timing.");
         ESP_LOGE(TAG, "RST should remain unconnected; reset_gpio_num is configured as -1.");
 
-        while (1) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+        stop_on_error();
     }
 
     uint8_t mac_addr[6] = {0};
@@ -417,6 +475,7 @@ void app_main(void)
     configure_plca(eth_handle);
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
+    assert(glue != NULL);
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, glue));
 
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
@@ -425,8 +484,19 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                got_ip_event_handler, NULL));
 
-    xTaskCreate(udp_rx_task, "udp_rx_task", 4096, NULL, 5, NULL);
-    xTaskCreate(udp_tx_task, "udp_tx_task", 4096, NULL, 5, NULL);
+    BaseType_t rx_task_created = xTaskCreate(udp_rx_task, "udp_rx_task",
+                                             4096, NULL, 5, NULL);
+    if (rx_task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create udp_rx_task");
+        stop_on_error();
+    }
+
+    BaseType_t tx_task_created = xTaskCreate(udp_tx_task, "udp_tx_task",
+                                             4096, NULL, 5, NULL);
+    if (tx_task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create udp_tx_task");
+        stop_on_error();
+    }
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 }
