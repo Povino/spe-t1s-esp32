@@ -1,0 +1,8 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## Required IDF version
+  idf:
+    version: '>=5.5.0'
+
+  ## Espressif LAN865x MAC-PHY driver for LAN8651 10BASE-T1S
+  espressif/lan865x: ^0.2.0
