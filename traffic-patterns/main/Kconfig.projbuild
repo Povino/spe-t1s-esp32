@@ -1,0 +1,92 @@
+menu "10BASE-T1S LAN8651 traffic patterns"
+
+    config APP_NODE_ID
+        int "PLCA node ID"
+        range 0 7
+        default 0
+        help
+            Node ID used for PLCA configuration and static IP assignment.
+            Node ID 0 becomes 192.168.50.1, node ID 1 becomes
+            192.168.50.2, and so on.
+
+    config APP_NODE_COUNT
+        int "PLCA node count"
+        range 2 8
+        default 2
+        help
+            Total number of nodes in the PLCA segment.
+            Use the same value on all nodes in the tested topology.
+
+    config APP_ENABLE_PLCA
+        bool "Enable PLCA"
+        default y
+        help
+            Enable Physical Layer Collision Avoidance.
+            Disable only for debugging or PLCA on/off comparison tests.
+
+    config APP_TEST_SENDER_MASK
+        int "Traffic sender node bit mask"
+        range 0 255
+        default 1
+        help
+            Bit mask selecting which nodes transmit during the test.
+            Node 0 is bit 0 with decimal value 1, node 1 is bit 1
+            with decimal value 2, node 2 is bit 2 with decimal value 4,
+            and so on. For example, value 1 selects node 0 only, value 6
+            selects nodes 1 and 2, and value 30 selects nodes 1, 2, 3,
+            and 4.
+
+    choice APP_TEST_DESTINATION_MODE
+        prompt "UDP destination mode"
+        default APP_TEST_DEST_BROADCAST
+        help
+            Select whether sender nodes transmit UDP broadcast traffic or
+            UDP unicast traffic to one configured destination node.
+
+        config APP_TEST_DEST_BROADCAST
+            bool "Broadcast to all nodes"
+
+        config APP_TEST_DEST_UNICAST
+            bool "Unicast to one destination node"
+    endchoice
+
+    config APP_TEST_DEST_NODE_ID
+        int "Destination node ID for unicast mode"
+        range 0 7
+        default 1
+        help
+            Destination node used when unicast mode is selected.
+            The destination IP address is derived from this node ID.
+
+    config APP_TEST_DURATION_S
+        int "Traffic test duration in seconds"
+        range 1 3600
+        default 30
+
+    config APP_TEST_START_DELAY_S
+        int "Delay before sender starts test in seconds"
+        range 0 60
+        default 5
+
+    config APP_TEST_PAYLOAD_BYTES
+        int "UDP test payload size in bytes"
+        range 16 1200
+        default 512
+        help
+            Generated test payload size. The full UDP payload also includes
+            a small measurement header.
+
+    config APP_TEST_TX_DELAY_US
+        int "Delay between transmitted packets in microseconds"
+        range 0 1000000
+        default 1000
+        help
+            Use 0 for maximum send rate.
+            Use a non-zero value to reduce generated traffic.
+
+    config APP_TEST_UDP_PORT
+        int "UDP test port"
+        range 1024 65535
+        default 5005
+
+endmenu
