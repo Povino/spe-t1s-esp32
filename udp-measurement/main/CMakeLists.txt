@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "t1s_lan8651_measurement.c"
+    SRCS "t1s_lan8651_udp_measurement.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         esp_eth

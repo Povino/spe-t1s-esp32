@@ -59,6 +59,8 @@ static const char *TAG = "T1S_LAN8651";
 #define TEST_MAGIC         0x5431534dU
 #define TEST_VERSION       1
 #define TEST_MAX_NODES     8
+#define TEST_RX_BUFFER_SIZE 1500
+#define TEST_RX_IDLE_TIMEOUT_US 3000000LL
 
 static volatile bool s_got_ip = false;
 
@@ -91,6 +93,56 @@ typedef struct {
 
 static rx_stat_t s_rx_stats[TEST_MAX_NODES];
 static volatile bool s_rx_result_printed = false;
+
+/**
+ * @brief Stop the application after an unrecoverable configuration or runtime error.
+ *
+ * The firmware is intended for reproducible laboratory measurements. If a
+ * configuration or initialization error is detected, the application remains
+ * alive and periodically yields instead of continuing with invalid test state.
+ */
+static void stop_on_error(void)
+{
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/**
+ * @brief Validate configuration values that depend on each other.
+ *
+ * Kconfig restricts individual option ranges, but relationships between
+ * options still need runtime validation. The configured node ID and sender ID
+ * must both fit within the selected topology, and the generated UDP packet
+ * must fit into the receiver buffer.
+ */
+static void validate_config(void)
+{
+    if (CONFIG_APP_NODE_COUNT > TEST_MAX_NODES) {
+        ESP_LOGE(TAG, "Invalid configuration: APP_NODE_COUNT=%d exceeds TEST_MAX_NODES=%d",
+                 CONFIG_APP_NODE_COUNT, TEST_MAX_NODES);
+        stop_on_error();
+    }
+
+    if (CONFIG_APP_NODE_ID >= CONFIG_APP_NODE_COUNT) {
+        ESP_LOGE(TAG, "Invalid configuration: APP_NODE_ID=%d, APP_NODE_COUNT=%d",
+                 CONFIG_APP_NODE_ID, CONFIG_APP_NODE_COUNT);
+        stop_on_error();
+    }
+
+    if (CONFIG_APP_TEST_SENDER_ID >= CONFIG_APP_NODE_COUNT) {
+        ESP_LOGE(TAG, "Invalid configuration: APP_TEST_SENDER_ID=%d, APP_NODE_COUNT=%d",
+                 CONFIG_APP_TEST_SENDER_ID, CONFIG_APP_NODE_COUNT);
+        stop_on_error();
+    }
+
+    const size_t packet_len = sizeof(test_udp_header_t) + CONFIG_APP_TEST_PAYLOAD_BYTES;
+    if (packet_len > TEST_RX_BUFFER_SIZE) {
+        ESP_LOGE(TAG, "Invalid configuration: UDP packet length=%u exceeds RX buffer size=%d",
+                 (unsigned int)packet_len, TEST_RX_BUFFER_SIZE);
+        stop_on_error();
+    }
+}
 
 /**
  * @brief Handle Ethernet link-state events from the ESP-IDF Ethernet driver.
@@ -238,11 +290,13 @@ static void configure_plca(esp_eth_handle_t eth_handle)
 }
 
 /**
- * @brief Print receiver-side measurement results when the test is complete.
+ * @brief Print receiver-side UDP measurement results when the test is complete.
  *
  * The function scans all per-source receive counters and prints one result
- * line for every source node that was observed. Results are printed only once,
- * either when forced or after a period without received packets.
+ * line for every source node that was observed. Packet loss is inferred from
+ * the first and last sequence numbers and the number of received packets.
+ * Results are printed only once, either when forced or after a period without
+ * received packets.
  *
  * @param force When true, results are printed immediately if any source was
  *              observed. When false, results are printed only after a receive
@@ -267,7 +321,7 @@ static void print_rx_results_if_ready(bool force)
         return;
     }
 
-    if (!force && (now_us - last_any_rx_us) < 3000000) {
+    if (!force && (now_us - last_any_rx_us) < TEST_RX_IDLE_TIMEOUT_US) {
         return;
     }
 
@@ -357,13 +411,21 @@ static void measurement_rx_task(void *arg)
     }
 
     int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        ESP_LOGW(TAG, "SO_REUSEADDR failed: errno=%d", errno);
+    }
 
     struct timeval timeout = {
         .tv_sec = 1,
         .tv_usec = 0,
     };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        ESP_LOGE(TAG, "SO_RCVTIMEO failed: errno=%d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
 
     struct sockaddr_in listen_addr = {0};
     listen_addr.sin_family = AF_INET;
@@ -379,7 +441,7 @@ static void measurement_rx_task(void *arg)
 
     ESP_LOGI(TAG, "Measurement RX listening on UDP port %d", CONFIG_APP_TEST_UDP_PORT);
 
-    uint8_t rx_buf[1500];
+    uint8_t rx_buf[TEST_RX_BUFFER_SIZE];
 
     while (1) {
         struct sockaddr_in source_addr = {0};
@@ -412,6 +474,10 @@ static void measurement_rx_task(void *arg)
         }
 
         if (header_len != sizeof(test_udp_header_t)) {
+            continue;
+        }
+
+        if ((size_t)len != ((size_t)header_len + (size_t)payload_len)) {
             continue;
         }
 
@@ -478,7 +544,12 @@ static void measurement_tx_task(void *arg)
     }
 
     int broadcast = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0) {
+        ESP_LOGE(TAG, "SO_BROADCAST failed: errno=%d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
 
     struct sockaddr_in dest_addr = {0};
     dest_addr.sin_family = AF_INET;
@@ -583,16 +654,16 @@ static void measurement_tx_task(void *arg)
 }
 
 /**
- * @brief Application entry point for the LAN8651 10BASE-T1S measurement test.
+ * @brief Application entry point for the LAN8651 10BASE-T1S UDP measurement test.
  *
  * The function initializes ESP-IDF networking, configures the static Ethernet
  * interface, initializes the SPI-connected LAN8651 MAC-PHY, applies PLCA
  * settings, attaches the Ethernet driver to esp-netif, registers event
- * handlers, starts measurement tasks, and starts the Ethernet driver.
+ * handlers, starts UDP measurement tasks, and starts the Ethernet driver.
  */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting LAN8651 10BASE-T1S measurement test firmware");
+    ESP_LOGI(TAG, "Starting LAN8651 10BASE-T1S UDP measurement firmware");
     ESP_LOGI(TAG, "Node ID: %d", CONFIG_APP_NODE_ID);
     ESP_LOGI(TAG, "Static IP: 192.168.50.%d", APP_IP_LAST_OCTET);
     ESP_LOGI(TAG, "Configured PLCA node count: %d", CONFIG_APP_NODE_COUNT);
@@ -602,6 +673,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Test payload: %d B", CONFIG_APP_TEST_PAYLOAD_BYTES);
     ESP_LOGI(TAG, "Test TX delay: %d us", CONFIG_APP_TEST_TX_DELAY_US);
     ESP_LOGI(TAG, "Test UDP port: %d", CONFIG_APP_TEST_UDP_PORT);
+    ESP_LOGI(TAG, "SPI clock: %d Hz", ETH_SPI_CLOCK_HZ);
+
+    validate_config();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -670,9 +744,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Check wiring, 3.3 V power, GND, MISO/MOSI, CS, IRQ, and Q1/CS timing.");
         ESP_LOGE(TAG, "RST should remain unconnected; reset_gpio_num is configured as -1.");
 
-        while (1) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+        stop_on_error();
     }
 
     uint8_t mac_addr[6] = {0};
@@ -686,6 +758,7 @@ void app_main(void)
     configure_plca(eth_handle);
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
+    assert(glue != NULL);
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, glue));
 
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
@@ -694,8 +767,19 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                got_ip_event_handler, NULL));
 
-    xTaskCreate(measurement_rx_task, "measurement_rx", 4096, NULL, 5, NULL);
-    xTaskCreate(measurement_tx_task, "measurement_tx", 4096, NULL, 5, NULL);
+    BaseType_t rx_task_created = xTaskCreate(measurement_rx_task, "measurement_rx",
+                                             4096, NULL, 5, NULL);
+    if (rx_task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create measurement_rx task");
+        stop_on_error();
+    }
+
+    BaseType_t tx_task_created = xTaskCreate(measurement_tx_task, "measurement_tx",
+                                             4096, NULL, 5, NULL);
+    if (tx_task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create measurement_tx task");
+        stop_on_error();
+    }
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 }
