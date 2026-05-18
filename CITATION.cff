@@ -12,7 +12,7 @@ url: "https://github.com/Povino/spe-t1s-esp32"
 repository-code: "https://github.com/Povino/spe-t1s-esp32"
 preferred-citation:
   type: thesis
-  title: "Single Pair Ethernet for sensor and IoT networks"
+  title: "Single Pair Ethernet for sensor networks and IoT"
   authors:
     - given-names: Martin
       family-names: Považan

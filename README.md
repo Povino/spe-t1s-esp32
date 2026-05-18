@@ -2,7 +2,7 @@
 
 This repository contains ESP-IDF firmware used for practical experiments with a 10BASE-T1S Single Pair Ethernet multidrop network based on ESP32 development boards and LAN8651 MAC-PHY modules.
 
-The code was prepared for the practical part of a diploma thesis focused on Single Pair Ethernet for sensor and IoT networks. It is intended for topology bring-up, connectivity verification, UDP throughput measurement, TCP throughput measurement, traffic-pattern testing, packet-loss observation, cable-length tests, PLCA configuration tests, and long-duration stability checks.
+The code was prepared for the practical part of a diploma thesis focused on Single Pair Ethernet for sensor networks and IoT. It is intended for topology bring-up, connectivity verification, UDP throughput measurement, TCP throughput measurement, traffic-pattern testing, packet-loss observation, cable-length tests, PLCA configuration tests, and long-duration stability checks.
 
 ## Project overview
 
